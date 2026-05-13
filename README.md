@@ -3,7 +3,6 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Latest-FF4B4B?logo=streamlit&logoColor=white)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-ML%2FDM-orange?logo=scikit-learn)
-![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen)
 
 **Projet académique — FST Tanger • LSI2 • Module DM & SID (2025/2026)**
