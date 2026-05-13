@@ -718,10 +718,6 @@ Ce projet est un **travail académique FST Tanger**. Les contributions sont bien
 
 ---
 
-## 📄 Licence
-
-**MIT License** — Libre d'usage académique, commercial ok avec attribution.
-
 ---
 
 ## 👨‍💻 Auteur
