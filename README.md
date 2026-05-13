@@ -748,3 +748,5 @@ Ce projet démontre une **approche de ML Engineering production-ready** :
 **Dernière mise à jour** : 13 Mai 2026  
 **Version** : 1.0.0 (Production Ready)
 
+(Libre d'usage académique, commercial ok avec attribution.)
+
