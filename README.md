@@ -716,16 +716,7 @@ coverage run -m pytest tests/ && coverage report
 
 ---
 
-## 🤝 Contribution & Support
 
-Ce projet est un **travail académique FST Tanger**. Les contributions sont bienvenues pour améliorations futures (Kubeflow, Docker, K8s, etc).
-
-**Problèmes courants** :
-- **"Aucune donnée au premier lancement"** → Exécute `python data/generate_synthetic.py 500` d'abord
-- **"Dashboard ne démarre pas"** → Vérifie `streamlit run dashboard/app.py` (port 8501 libre)
-- **"Modèles ne se sauvegardent pas"** → Vérifie `ml/models/` existe et writable
-
----
 
 ## 👨‍💻 Auteur
 
