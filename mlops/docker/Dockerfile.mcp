@@ -1,0 +1,40 @@
+# mlops/docker/Dockerfile.mcp
+FROM python:3.11-slim
+
+LABEL maintainer="Smart eCommerce Intelligence Team"
+LABEL description="Model Context Protocol Server for responsible AI agents"
+
+# Installation des dépendances système
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Création du répertoire de travail
+WORKDIR /app
+
+# Copie des requirements
+COPY requirements.txt .
+
+# Installation des dépendances Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copie du code source
+COPY configs/ ./configs/
+COPY data/ ./data/
+COPY mcp_server/ ./mcp_server/
+
+# Création des répertoires de logs
+RUN mkdir -p logs/mcp
+
+# Variables d'environnement
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+ENV MCP_LOG_LEVEL=INFO
+
+# Healthcheck basé sur le processus (le serveur MCP utilise stdio, pas HTTP)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD pgrep -f mcp_server.server || exit 1
+
+# Commande de démarrage
+CMD ["python", "-m", "mcp_server.server"]

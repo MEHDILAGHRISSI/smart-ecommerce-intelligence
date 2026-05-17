@@ -1,30 +1,52 @@
-"""Nettoyage et amélioration des descriptions produits via LLM."""
+"""
+llm/description_cleaner.py — Smart eCommerce Intelligence
+==========================================================
+Nettoyage et amélioration des descriptions produits via LLM.
 
-import os
+Utilise llm.llm_router pour le fallback automatique entre fournisseurs.
+"""
+
+from __future__ import annotations
 from loguru import logger
-import openai
+from llm.llm_router import call_llm_simple, detect_active_providers
 
 
-# Remplace par 'anthropic' ou autre selon ton choix de LLM
+_SYSTEM = (
+    "Tu es un expert en rédaction e-commerce. "
+    "Tu corriges les descriptions produits : tu retires le jargon promotionnel agressif, "
+    "tu corriges les fautes, et tu formates proprement. "
+    "Réponds UNIQUEMENT avec la description corrigée, sans explication."
+)
+
+_PROMPT_TEMPLATE = (
+    "Corrige, nettoie et formate proprement cette description produit e-commerce :\n\n{raw}"
+)
+
 
 def clean_description(raw_description: str) -> str:
-    """Utilise un LLM pour formater et corriger une description produit."""
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
-        logger.error("Clé API LLM introuvable. Retour de la description brute.")
+    """
+    Utilise un LLM pour améliorer une description produit brute.
+
+    Si aucune clé API n'est configurée, retourne la description brute.
+    Supporte automatiquement : Groq, Anthropic, OpenAI, Gemini (fallback).
+    """
+    if not raw_description or not raw_description.strip():
         return raw_description
 
-    client = openai.OpenAI(api_key=api_key)
+    # Si aucun fournisseur n'est dispo, on ne gaspille pas de temps
+    if not detect_active_providers():
+        logger.debug("[DescriptionCleaner] Aucun fournisseur LLM disponible — retour brut.")
+        return raw_description
 
-    prompt = f"Corrige les fautes, retire le jargon promotionnel agressif et formate proprement cette description e-commerce :\n\n{raw_description}"
+    prompt = _PROMPT_TEMPLATE.format(raw=raw_description[:2000])  # limite de sécurité
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Erreur LLM lors du nettoyage : {e}")
+        result = call_llm_simple(prompt, system=_SYSTEM)
+        # Vérifier que le résultat est une vraie réponse (pas un message démo)
+        if result.startswith("⚠️"):
+            return raw_description
+        logger.debug(f"[DescriptionCleaner] Description enrichie ({len(result)} chars)")
+        return result
+    except Exception as exc:
+        logger.warning(f"[DescriptionCleaner] Erreur LLM : {exc} — retour brut.")
         return raw_description

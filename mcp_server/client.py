@@ -6,12 +6,12 @@ Client MCP à utiliser depuis le dashboard Streamlit ou le LLM.
 Permet à l'assistant IA d'appeler les outils e-commerce de façon responsable.
 
 Usage dans dashboard/app.py :
-    from mcp.client import MCPClient
+    from mcp_server.client import MCPClient
     mcp = MCPClient()
     top_products = mcp.get_top_products(limit=10, category="Électronique")
 
 Usage avec Claude API (A2A) :
-    from mcp.client import MCPClient, build_mcp_system_prompt
+    from mcp_server.client import MCPClient, build_mcp_system_prompt
     mcp = MCPClient()
     prompt = build_mcp_system_prompt(mcp)
 """
@@ -43,7 +43,7 @@ class MCPClient:
                 import sys
                 from pathlib import Path
                 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-                from mcp.server import SmartEcommerceMCPServer
+                from mcp_server.server import SmartEcommerceMCPServer
                 self._server = SmartEcommerceMCPServer()
             except Exception as e:
                 print(f"⚠️ MCP local non disponible: {e}. Mode HTTP activé.")

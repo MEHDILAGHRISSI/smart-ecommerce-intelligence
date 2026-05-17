@@ -1,0 +1,49 @@
+# ============================================================
+# requirements-pipeline.txt
+# ============================================================
+# Dépendances isolées pour le conteneur Pipeline ML + Kubeflow.
+# Séparé du requirements.txt global pour résoudre le conflit
+# protobuf entre kfp (<5) et google-genai/grpcio-status (>=5).
+#
+# ⚠️  Google Gemini (google-generativeai) est exclu ici car il
+#     force protobuf>=5.26.1 via grpcio-status. Les providers
+#     LLM disponibles dans ce conteneur : Groq, Claude, OpenAI.
+# ============================================================
+
+# --- Kubeflow Pipeline SDK (versions verrouillées) ---
+kfp==2.11.0
+protobuf==4.25.3
+click==8.1.8
+
+# --- Core Data Science ---
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+scipy==1.17.1
+xgboost==2.0.3
+joblib==1.4.2
+mlxtend==0.23.1
+
+# --- Configuration & Logging ---
+loguru==0.7.2
+pydantic==2.7.1
+pydantic-settings==2.3.4
+pydantic_core==2.18.2
+python-dotenv==1.0.1
+
+# --- HTTP / Scraping (Agents A2A) ---
+httpx==0.27.0
+requests==2.32.3
+playwright==1.44.0
+
+# --- LLM Clients (sans Google GenAI) ---
+anthropic==0.101.0
+openai==2.30.0
+groq==1.2.0
+
+# --- Utilitaires ---
+tqdm==4.67.3
+typing_extensions==4.15.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+annotated-types==0.7.0

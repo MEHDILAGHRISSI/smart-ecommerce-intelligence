@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional, Dict, Any, List
 
+from bs4 import BeautifulSoup
 from loguru import logger
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -22,6 +24,7 @@ class ShopifyScraperAgent(BaseScraperAgent):
     Stratégie :
     - Priorité : API JSON native de Shopify (/products.json) — publique, sans clé
     - Fallback  : Playwright scrape la page /collections/all
+    - Dans le fallback Playwright, priorité à l'extraction JSON-LD (Schema.org)
     """
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
@@ -42,10 +45,13 @@ class ShopifyScraperAgent(BaseScraperAgent):
             logger.debug(f"[shopify] API retourne {len(products)} produits (page {page})")
             return products
         except Exception as e:
-            # Correction: Passage d'un seul message string à l'exception
             raise APIUnavailableError(f"Erreur API Shopify: {str(e)}") from e
 
     async def fetch_via_playwright(self, page_num: int = 1) -> list[dict]:
+        """
+        Scrape une page de collection Shopify avec priorité JSON-LD.
+        Retourne une liste de dictionnaires bruts (normalisés ensuite).
+        """
         url = f"{self.base_url}/collections/all?page={page_num}"
         try:
             async with PlaywrightDriver(headless=True) as driver:
@@ -53,6 +59,16 @@ class ShopifyScraperAgent(BaseScraperAgent):
                 await page.goto(url, wait_until="domcontentloaded")
                 await page.wait_for_selector(".product-item, .product-card, [data-product-id]", timeout=10_000)
 
+                # Récupère le HTML complet pour parser le JSON-LD
+                html_content = await page.content()
+                products_from_jsonld = self._extract_products_from_jsonld(html_content, self.base_url)
+
+                if products_from_jsonld:
+                    logger.info(f"[shopify] JSON-LD trouvé : {len(products_from_jsonld)} produits extraits")
+                    return products_from_jsonld
+
+                # Fallback : extraction par sélecteurs CSS (méthode existante)
+                logger.warning("[shopify] JSON-LD absent ou vide, fallback vers sélecteurs CSS")
                 products = await page.evaluate("""() => {
                     const cards = document.querySelectorAll('.product-item, .product-card, .grid__item');
                     return Array.from(cards).map(card => {
@@ -65,15 +81,81 @@ class ShopifyScraperAgent(BaseScraperAgent):
                             price_raw: priceEl?.innerText?.trim() || '0',
                             product_url: linkEl ? window.location.origin + linkEl.getAttribute('href') : '',
                             image_url: imgEl?.src || '',
-                            _source: 'playwright'
+                            _source: 'playwright_css_fallback'
                         };
                     }).filter(p => p.title);
                 }""")
-            return products
+                return products
+
         except PlaywrightTimeoutError as e:
             raise ScrapingError(f"Timeout Playwright sur {url} : {e}") from e
         except Exception as e:
             raise ScrapingError(f"Erreur Playwright sur {url}: {str(e)}") from e
+
+    def _extract_products_from_jsonld(self, html: str, base_url: str) -> List[Dict[str, Any]]:
+        """
+        Extrait les produits à partir des balises <script type="application/ld+json">.
+        Retourne une liste de dictionnaires conformes au format attendu par normalize().
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        scripts = soup.find_all("script", type="application/ld+json")
+        products = []
+
+        for script in scripts:
+            try:
+                data = json.loads(script.string)
+                # Gère le cas où data est une liste
+                items = data if isinstance(data, list) else [data]
+
+                for item in items:
+                    if item.get("@type") == "Product":
+                        # Extraction des champs
+                        name = item.get("name", "")
+                        description = item.get("description", "")
+                        offers = item.get("offers", {})
+                        price = 0.0
+                        currency = "MAD"
+                        if offers:
+                            price_str = offers.get("price", "0")
+                            if isinstance(price_str, str):
+                                price_str = price_str.replace(",", ".")
+                            try:
+                                price = float(price_str)
+                            except ValueError:
+                                price = 0.0
+                            currency = offers.get("priceCurrency", "MAD")
+
+                        # URL du produit (relative ou absolue)
+                        product_url = item.get("url", "")
+                        if product_url and not product_url.startswith("http"):
+                            product_url = base_url.rstrip("/") + "/" + product_url.lstrip("/")
+
+                        # Image principale
+                        image = item.get("image", "")
+                        if isinstance(image, list) and image:
+                            image = image[0]
+                        elif isinstance(image, dict):
+                            image = image.get("url", "")
+
+                        # SKU ou identifiant (optionnel)
+                        sku = item.get("sku", "")
+
+                        product_dict = {
+                            "title": name,
+                            "description": description,
+                            "price_raw": str(price),
+                            "currency": currency,
+                            "product_url": product_url,
+                            "image_url": image,
+                            "sku": sku,
+                            "_source": "jsonld",
+                        }
+                        products.append(product_dict)
+            except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                logger.debug(f"Erreur parsing JSON-LD : {e}")
+                continue
+
+        return products
 
     def normalize(self, raw: dict) -> ProductSchema:
         try:
@@ -140,14 +222,17 @@ class ShopifyScraperAgent(BaseScraperAgent):
                     source_platform="shopify"
                 )
 
-            # Cas Playwright : données partielles extraites du DOM
+            # Cas Playwright (CSS ou JSON-LD) : données partielles
             else:
                 price = _parse_price(raw.get("price_raw", "0"))
+                # Si la devise a été extraite via JSON-LD, on l'utilise
+                currency = raw.get("currency", "MAD")
                 return ProductSchema(
                     id=_url_to_id(raw.get("product_url", "")),
                     title=raw.get("title", "Produit inconnu"),
+                    description=raw.get("description"),
                     price=price,
-                    currency="MAD",
+                    currency=currency,
                     product_url=raw.get("product_url", self.base_url),
                     image_url=raw.get("image_url"),
                     source_platform="shopify_playwright"

@@ -33,21 +33,18 @@ import joblib
 import numpy as np
 import pandas as pd
 from loguru import logger
-from sklearn.cluster import DBSCAN, KMeans
-from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-    accuracy_score, davies_bouldin_score, f1_score,
-    precision_score, recall_score, roc_auc_score, silhouette_score,
+    accuracy_score, f1_score, precision_score, recall_score, roc_auc_score,
 )
-from sklearn.model_selection import cross_val_score, train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 
 from configs.settings import DATA_PROCESSED_DIR, DATA_RAW_DIR
-from ml.cleaner import clean, load_latest_raw_products, save_cleaned
+from ml.cleaner import clean, load_latest_raw_products
+from ml.clustering import cluster_products
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 FEATURE_COLUMNS = [
@@ -57,7 +54,21 @@ FEATURE_COLUMNS = [
     "brand_score", "shop_reputation", "review_rating_coherence",
     "title_length_norm", "category_popularity", "price_volatility", "tag_diversity",
 ]
-CLUSTER_FEATURES = ["price_score", "rating_score", "popularity_score", "discount_score"]
+CLUSTER_TARGET_LEAKAGE_COLUMNS = {
+    "price_score",
+    "rating_score",
+    "popularity_score",
+    "stock_score",
+    "discount_score",
+    "value_for_money",
+    "price_to_median_ratio",
+    "log_reviews",
+    "variant_diversity",
+    "n_images_norm",
+    "log_price",
+    "composite_score",
+}
+CLUSTER_FEATURES = ["log_price", "rating_score", "popularity_score", "stock_score", "discount_score"]
 MODELS_DIR = PROJECT_ROOT / "ml" / "models"
 
 
@@ -78,6 +89,43 @@ def _step_banner(num: int, title: str) -> None:
     logger.info(f"{'═' * 60}")
     logger.info(f"  ÉTAPE {num} — {title}")
     logger.info(f"{'═' * 60}")
+
+
+def _normalize_series(series: pd.Series) -> pd.Series:
+    """Normalise une série en [0,1] de façon robuste."""
+    s = pd.to_numeric(series, errors="coerce").astype(float).fillna(0.0)
+    if s.nunique(dropna=True) <= 1:
+        return pd.Series(0.0, index=s.index)
+    min_v = float(s.min())
+    max_v = float(s.max())
+    return (s - min_v) / (max_v - min_v)
+
+
+def _assign_cluster_names(cluster_summary: pd.DataFrame) -> dict[int, str]:
+    """Associe les clusters KMeans à des noms métier stables."""
+    profiles = cluster_summary.copy()
+    for col in ["log_price", "rating_score", "popularity_score", "stock_score", "discount_score"]:
+        if col in profiles.columns:
+            profiles[col] = _normalize_series(profiles[col])
+        else:
+            profiles[col] = 0.0
+
+    score_map = {
+        "Premium": profiles["log_price"] * 0.45 + profiles["rating_score"] * 0.35 + profiles["popularity_score"] * 0.20,
+        "Budget": profiles["discount_score"] * 0.40 + (1 - profiles["log_price"]) * 0.35 + (1 - profiles["rating_score"]) * 0.25,
+        "Populaire": profiles["popularity_score"] * 0.55 + profiles["rating_score"] * 0.25 + profiles["stock_score"] * 0.20,
+        "Inactif": (1 - profiles["popularity_score"]) * 0.50 + (1 - profiles["stock_score"]) * 0.30 + (1 - profiles["rating_score"]) * 0.20,
+    }
+
+    remaining = list(profiles.index)
+    mapping: dict[int, str] = {}
+    for semantic_label in ["Premium", "Budget", "Populaire", "Inactif"]:
+        score_series = score_map[semantic_label].astype(float)
+        candidates = {int(idx): float(score_series.at[idx]) for idx in remaining}
+        chosen_idx = max(candidates, key=candidates.get)
+        mapping[chosen_idx] = semantic_label
+        remaining.remove(chosen_idx)
+    return mapping
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +160,10 @@ def step_features(df: pd.DataFrame, top_k: int) -> pd.DataFrame:
     # ── Groupe 1 : Scores normalisés [0, 1] ───────────────────────────────────
     max_price = df["price"].max()
     df["price_score"] = (1 - df["price"] / max_price).clip(0, 1) if max_price > 0 else 0.5
+    df["log_price"] = pd.Series(
+        np.log1p(pd.to_numeric(df["price"], errors="coerce").clip(lower=0).fillna(0.0)),
+        index=df.index,
+    ).replace([np.inf, -np.inf], 0.0).fillna(0.0)
     df["rating_score"] = (df["rating"] / 5.0).clip(0, 1)
     df["log_reviews"] = np.log1p(df["review_count"])
     max_log = df["log_reviews"].max()
@@ -187,7 +239,7 @@ def step_features(df: pd.DataFrame, top_k: int) -> pd.DataFrame:
     else:
         df["tag_diversity"] = 0.0
 
-    # ── Composite Score (pondération métier) ──────────────────────────────────
+    # ── Composite Score (ranking heuristique uniquement, pas une cible) ──────
     df["composite_score"] = (
         df["rating_score"] * 0.30
         + df["popularity_score"] * 0.25
@@ -196,11 +248,7 @@ def step_features(df: pd.DataFrame, top_k: int) -> pd.DataFrame:
         + df["product_completeness"] * 0.10
     ).clip(0, 1)
 
-    # ── Label Top-K (utilisé pour l'entraînement supervisé) ───────────────────
-    threshold = df["composite_score"].nlargest(top_k).min()
-    df["is_top_product"] = (df["composite_score"] >= threshold).astype(int)
-
-    logger.info(f"   ✅ 20 features créées | Composite Score | Top-{top_k} labellisé")
+    logger.info(f"   ✅ 20 features créées | Composite Score conservé comme score de ranking")
     _save_csv(df, "products_features.csv")
     return df
 
@@ -209,14 +257,21 @@ def step_features(df: pd.DataFrame, top_k: int) -> pd.DataFrame:
 # ÉTAPE 3 — ENTRAÎNEMENT SUPERVISÉ (RandomForest + XGBoost)
 # ─────────────────────────────────────────────────────────────────────────────
 def step_train(df: pd.DataFrame) -> dict[str, dict[str, float]]:
-    _step_banner(3, "ENTRAÎNEMENT SUPERVISÉ (RandomForest + XGBoost)")
+    _step_banner(3, "ENTRAÎNEMENT SUPERVISÉ (RandomForest + XGBoost sur clusters)")
 
-    X = df[FEATURE_COLUMNS].fillna(0)
-    y = df["is_top_product"]
-    n_pos = y.sum()
+    if "cluster_label" not in df.columns:
+        logger.warning("   ⚠️  Colonne cluster_label absente. Entraînement supervisé ignoré.")
+        return {}
 
-    if n_pos < 5:
-        logger.warning(f"   ⚠️  Seulement {n_pos} produits Top-K. Entraînement supervisé ignoré.")
+    feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns and c not in CLUSTER_TARGET_LEAKAGE_COLUMNS]
+    X = df[feature_cols].fillna(0)
+
+    from sklearn.preprocessing import LabelEncoder
+
+    le = LabelEncoder()
+    y = le.fit_transform(df["cluster_label"].astype(str))
+    if len(np.unique(y)) < 2:
+        logger.warning("   ⚠️  Trop peu de clusters uniques pour entraîner un classifieur.")
         return {}
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -235,16 +290,24 @@ def step_train(df: pd.DataFrame) -> dict[str, dict[str, float]]:
     joblib.dump(rf, MODELS_DIR / "random_forest.joblib")
 
     y_pred_rf = rf.predict(X_test)
-    y_proba_rf = rf.predict_proba(X_test)[:, 1]
+    y_proba_rf = rf.predict_proba(X_test)
     acc_rf = accuracy_score(y_test, y_pred_rf)
-    f1_rf = f1_score(y_test, y_pred_rf, zero_division=0)
-    auc_rf = roc_auc_score(y_test, y_proba_rf)
-    metrics["rf"] = {"accuracy": round(acc_rf, 3), "f1": round(f1_rf, 3), "auc_roc": round(auc_rf, 3)}
-    logger.info(f"   [RF] Acc={acc_rf:.3f} | F1={f1_rf:.3f} | AUC={auc_rf:.3f}")
+    f1_rf = f1_score(y_test, y_pred_rf, average="weighted", zero_division=0)
+    precision_rf = precision_score(y_test, y_pred_rf, average="weighted", zero_division=0)
+    recall_rf = recall_score(y_test, y_pred_rf, average="weighted", zero_division=0)
+    auc_rf = roc_auc_score(y_test, y_proba_rf, multi_class="ovr", average="weighted") if y_proba_rf.shape[1] > 2 else roc_auc_score(y_test, y_proba_rf[:, 1])
+    metrics["rf"] = {
+        "accuracy": round(acc_rf, 3),
+        "f1": round(f1_rf, 3),
+        "precision": round(precision_rf, 3),
+        "recall": round(recall_rf, 3),
+        "auc_roc": round(float(auc_rf), 3),
+    }
+    logger.info(f"   [RF] Acc={acc_rf:.3f} | F1={f1_rf:.3f} | AUC={float(auc_rf):.3f}")
 
     # Feature Importance
     fi = pd.DataFrame({
-        "feature": FEATURE_COLUMNS,
+        "feature": feature_cols,
         "importance": rf.feature_importances_
     }).sort_values("importance", ascending=False)
     _save_csv(fi, "feature_importance.csv")
@@ -252,22 +315,37 @@ def step_train(df: pd.DataFrame) -> dict[str, dict[str, float]]:
 
     # ── XGBoost ───────────────────────────────────────────────────────────────
     logger.info("   [XGBoost] Entraînement...")
-    scale_pos = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
-    xgb = XGBClassifier(
-        max_depth=6, learning_rate=0.1, n_estimators=100,
-        scale_pos_weight=scale_pos, eval_metric="logloss",
-        random_state=42, n_jobs=-1
-    )
+    n_classes = len(le.classes_)
+    xgb_kwargs = {
+        "max_depth": 6,
+        "learning_rate": 0.1,
+        "n_estimators": 150,
+        "random_state": 42,
+        "n_jobs": -1,
+        "eval_metric": "mlogloss" if n_classes > 2 else "logloss",
+        "objective": "multi:softprob" if n_classes > 2 else "binary:logistic",
+    }
+    if n_classes > 2:
+        xgb_kwargs["num_class"] = n_classes
+    xgb = XGBClassifier(**xgb_kwargs)
     xgb.fit(X_train, y_train)
     joblib.dump(xgb, MODELS_DIR / "xgboost.joblib")
 
     y_pred_xgb = xgb.predict(X_test)
-    y_proba_xgb = xgb.predict_proba(X_test)[:, 1]
+    y_proba_xgb = xgb.predict_proba(X_test)
     acc_xgb = accuracy_score(y_test, y_pred_xgb)
-    f1_xgb = f1_score(y_test, y_pred_xgb, zero_division=0)
-    auc_xgb = roc_auc_score(y_test, y_proba_xgb)
-    metrics["xgb"] = {"accuracy": round(acc_xgb, 3), "f1": round(f1_xgb, 3), "auc_roc": round(auc_xgb, 3)}
-    logger.info(f"   [XGB] Acc={acc_xgb:.3f} | F1={f1_xgb:.3f} | AUC={auc_xgb:.3f}")
+    f1_xgb = f1_score(y_test, y_pred_xgb, average="weighted", zero_division=0)
+    precision_xgb = precision_score(y_test, y_pred_xgb, average="weighted", zero_division=0)
+    recall_xgb = recall_score(y_test, y_pred_xgb, average="weighted", zero_division=0)
+    auc_xgb = roc_auc_score(y_test, y_proba_xgb, multi_class="ovr", average="weighted") if y_proba_xgb.shape[1] > 2 else roc_auc_score(y_test, y_proba_xgb[:, 1])
+    metrics["xgb"] = {
+        "accuracy": round(acc_xgb, 3),
+        "f1": round(f1_xgb, 3),
+        "precision": round(precision_xgb, 3),
+        "recall": round(recall_xgb, 3),
+        "auc_roc": round(float(auc_xgb), 3),
+    }
+    logger.info(f"   [XGB] Acc={acc_xgb:.3f} | F1={f1_xgb:.3f} | AUC={float(auc_xgb):.3f}")
 
     return metrics
 
@@ -277,50 +355,7 @@ def step_train(df: pd.DataFrame) -> dict[str, dict[str, float]]:
 # ─────────────────────────────────────────────────────────────────────────────
 def step_cluster(df: pd.DataFrame) -> pd.DataFrame:
     _step_banner(4, "CLUSTERING (KMeans + DBSCAN + PCA 2D)")
-
-    X = df[CLUSTER_FEATURES].fillna(0)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    # KMeans
-    inertias, silhouettes = [], []
-    K_range = range(2, min(11, len(df) // 10 + 1))
-    for k in K_range:
-        km_test = KMeans(n_clusters=k, n_init=10, random_state=42)
-        labels = km_test.fit_predict(X_scaled)
-        inertias.append(km_test.inertia_)
-        silhouettes.append(silhouette_score(X_scaled, labels))
-
-    best_k = silhouettes.index(max(silhouettes)) + 2
-    logger.info(f"   [KMeans] Meilleur K = {best_k} (Silhouette={max(silhouettes):.3f})")
-
-    kmeans = KMeans(n_clusters=best_k, n_init=10, random_state=42)
-    df["cluster"] = kmeans.fit_predict(X_scaled)
-    df["cluster_label"] = df["cluster"].apply(lambda x: f"Segment {x}")
-
-    sil = silhouette_score(X_scaled, df["cluster"])
-    db = davies_bouldin_score(X_scaled, df["cluster"])
-    logger.info(f"   [KMeans] Silhouette={sil:.3f} | Davies-Bouldin={db:.3f}")
-
-    dist = df["cluster_label"].value_counts().to_dict()
-    for seg, cnt in sorted(dist.items()):
-        logger.info(f"      {seg} : {cnt} produits")
-
-    # DBSCAN (détection d'anomalies)
-    dbscan = DBSCAN(eps=0.5, min_samples=5, n_jobs=-1)
-    df["dbscan_cluster"] = dbscan.fit_predict(X_scaled)
-    n_outliers = int((df["dbscan_cluster"] == -1).sum())
-    logger.info(f"   [DBSCAN] {n_outliers} outliers/{len(df)} produits ({n_outliers/len(df)*100:.1f}%)")
-
-    # PCA 2D - CORRECTION : Utiliser PC1 et PC2 (majuscules) au lieu de pca_1 et pca_2
-    pca = PCA(n_components=2)
-    X_pca = pca.fit_transform(X_scaled)
-    df["PC1"] = X_pca[:, 0]
-    df["PC2"] = X_pca[:, 1]
-    variance = sum(pca.explained_variance_ratio_[:2]) * 100
-    df["pca_variance_explained"] = round(variance, 2)
-    logger.info(f"   [PCA] Variance expliquée par PC1+PC2 : {variance:.1f}%")
-
+    df = cluster_products(df, pca_components=2)
     _save_csv(df, "products_clustered.csv")
     return df
 
@@ -385,7 +420,8 @@ def step_export(df: pd.DataFrame, top_k: int) -> None:
     pca_cols = [
         "PC1", "PC2",                      # Coordonnées PCA (obligatoires)
         "pca_variance_explained",          # Pour la metric card de variance
-        "cluster", "cluster_label",        # Pour compter et afficher les clusters
+        "cluster", "cluster_label", "dbscan_outlier", "iforest_outlier",
+        "is_anomaly", "price_anomaly_flag", "price_anomaly_score",
         "title", "category", "shop_name",  # Pour les hover data
         "is_top_product", "price", "rating", "composite_score"  # Données supplémentaires
     ]
@@ -426,31 +462,31 @@ def main(input_file: str | None, top_k: int) -> None:
     # ── Étape 2 : Feature Engineering ────────────────────────────────────────
     try:
         df = step_features(df, top_k=top_k)
-        results["step2_features"] = f"✅ 20 features | Top-{top_k} labellisé"
+        results["step2_features"] = "✅ 20 features | ranking heuristique préparé"
     except Exception as e:
         logger.error(f"❌ ÉTAPE 2 (Feature Engineering) — ÉCHEC : {e}")
         raise SystemExit(1)
 
-    # ── Étape 3 : Supervisé ───────────────────────────────────────────────────
+    # ── Étape 3 : Clustering ──────────────────────────────────────────────────
+    try:
+        df = step_cluster(df)
+        n_seg = df["cluster_label"].nunique() if "cluster_label" in df.columns else df["cluster"].nunique()
+        results["step3_cluster"] = f"✅ {n_seg} segments métier | Isolation Forest + PCA 2D"
+    except Exception as e:
+        logger.error(f"❌ ÉTAPE 3 (Clustering) — ÉCHEC : {e}")
+        logger.warning("   Continuation avec les étapes suivantes...")
+
+    # ── Étape 4 : Supervisé (apprend à prédire les clusters) ─────────────────
     try:
         ml_metrics = step_train(df)
         if ml_metrics:
-            rf_auc  = ml_metrics.get("rf",  {}).get("auc_roc", "N/A")
+            rf_auc = ml_metrics.get("rf", {}).get("auc_roc", "N/A")
             xgb_auc = ml_metrics.get("xgb", {}).get("auc_roc", "N/A")
-            results["step3_train"] = f"✅ RF AUC={rf_auc} | XGB AUC={xgb_auc}"
+            results["step4_train"] = f"✅ RF AUC={rf_auc} | XGB AUC={xgb_auc}"
         else:
-            results["step3_train"] = "⚠️  Ignoré (données insuffisantes)"
+            results["step4_train"] = "⚠️  Ignoré (clusters insuffisants)"
     except Exception as e:
-        logger.error(f"❌ ÉTAPE 3 (Supervisé) — ÉCHEC : {e}")
-        logger.warning("   Continuation avec les étapes suivantes...")
-
-    # ── Étape 4 : Clustering ──────────────────────────────────────────────────
-    try:
-        df = step_cluster(df)
-        n_seg = df["cluster"].nunique()
-        results["step4_cluster"] = f"✅ {n_seg} segments KMeans | DBSCAN + PCA 2D"
-    except Exception as e:
-        logger.error(f"❌ ÉTAPE 4 (Clustering) — ÉCHEC : {e}")
+        logger.error(f"❌ ÉTAPE 4 (Supervisé clusters) — ÉCHEC : {e}")
         logger.warning("   Continuation avec les étapes suivantes...")
 
     # ── Étape 5 : Apriori ────────────────────────────────────────────────────
@@ -488,6 +524,12 @@ def main(input_file: str | None, top_k: int) -> None:
     logger.info("╚══════════════════════════════════════════════════════════╝")
 
 
+def start_ml_pipeline(input_file: str | None = None, top_k: int = 20) -> None:
+    """Point d'entrée interne pour l'orchestrateur et les appels programmatiques."""
+    logger.info(f"🚀 Démarrage du pipeline ML interne sur : {input_file}")
+    return main(input_file=input_file, top_k=top_k)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Smart eCommerce — Pipeline Local")
@@ -500,4 +542,4 @@ if __name__ == "__main__":
         help="Nombre de produits Top-K à sélectionner (défaut: 20)"
     )
     args = parser.parse_args()
-    main(input_file=args.input, top_k=args.topk)
+    start_ml_pipeline(args.input, args.topk)

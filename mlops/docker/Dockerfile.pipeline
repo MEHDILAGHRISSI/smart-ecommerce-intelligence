@@ -1,0 +1,46 @@
+# mlops/docker/Dockerfile.pipeline
+FROM python:3.11-slim
+
+LABEL maintainer="Smart eCommerce Intelligence Team"
+LABEL description="ML Pipeline for product analysis and Top-K selection"
+
+# Installation des dépendances système
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Création du répertoire de travail
+WORKDIR /app
+
+# Copie des requirements isolés (sans conflit protobuf)
+COPY mlops/kubeflow/requirements-pipeline.txt .
+
+# Installation des dépendances Python
+RUN pip install --no-cache-dir -r requirements-pipeline.txt
+
+# Copie du code source
+COPY agents/ ./agents/
+COPY configs/ ./configs/
+COPY data/ ./data/
+COPY llm/ ./llm/
+COPY ml/ ./ml/
+COPY mcp_server/ ./mcp_server/
+COPY run_local.py .
+COPY run_pipeline.py .
+
+# Création des répertoires de sortie
+RUN mkdir -p data/processed logs ml/models
+
+# Variables d'environnement
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import sys; sys.exit(0)"
+
+# Commande par défaut (sera overridée par docker-compose)
+CMD ["python", "run_local.py", "--input", "data/raw/products_enriched_overnight.json", "--topk", "30"]

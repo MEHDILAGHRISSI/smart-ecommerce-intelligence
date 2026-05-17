@@ -1,0 +1,65 @@
+# docker-compose.yml — Smart eCommerce Intelligence
+# CORRECTION : shm_size ajouté au service pipeline
+# Playwright/Chromium headless nécessite au moins 2 Go de mémoire partagée.
+# Sans ça, Chromium crash sur les pages lourdes (Shopify avec images) :
+# "Target Closed" ou "Error: Page closed" au premier goto().
+
+volumes:
+  shared-data:
+    driver: local
+
+services:
+  # ──────────────────────────────────────────────────────────
+  # Service 1 — Pipeline ML (scraping + feature eng + clustering)
+  # ──────────────────────────────────────────────────────────
+  pipeline:
+    build:
+      context: .
+      dockerfile: mlops/docker/Dockerfile.pipeline
+    container_name: sei-pipeline
+    env_file:
+      - .env
+    volumes:
+      - shared-data:/app/data/processed
+    # CORRECTION CRITIQUE : Playwright/Chromium headless sature /dev/shm
+    # (64 Mo par défaut dans Docker) sur les pages riches en médias.
+    # 2 Go est la valeur recommandée pour un usage e-commerce stable.
+    shm_size: '2gb'
+    restart: "no"
+
+  # ──────────────────────────────────────────────────────────
+  # Service 2 — Dashboard Streamlit (BI + Visualisation)
+  # ──────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: mlops/docker/Dockerfile.dashboard
+    container_name: sei-dashboard
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - shared-data:/app/data/processed
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Service 3 — Serveur MCP (Model Context Protocol, stdio)
+  # ──────────────────────────────────────────────────────────
+  mcp_server:
+    build:
+      context: .
+      dockerfile: mlops/docker/Dockerfile.mcp
+    container_name: sei-mcp
+    env_file:
+      - .env
+    volumes:
+      - shared-data:/app/data/processed
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stdin_open: true
