@@ -97,36 +97,40 @@ Les **Top-K** sont automatiquement labellisés pour l'entraînement supervisé.
 
 ### 5️⃣ Intelligence Augmentée par LLM
 
-**Cascade de fallback automatique** (ordre de priorité) :
+**Cascade de fallback automatique (ordre de priorité configuré) :**
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ 1. ⚡ Groq (Llama-3.3-70b) — GRATUIT, ultra-rapide  │
+│ 1. ⚡ Groq (Llama3-8b-8192) — Gratuit & ultra-rapide │
 ├─────────────────────────────────────────────────────┤
-│ 2. 🔵 Google Gemini — GRATUIT                      │
+│ 2. 🟣 Anthropic Claude — Support Claude 3           │
 ├─────────────────────────────────────────────────────┤
-│ 3. 🟣 Anthropic Claude — Payant (meilleure qualité) │
+│ 3. 🟢 OpenAI GPT — Industrie Standard               │
 ├─────────────────────────────────────────────────────┤
-│ 4. 🟢 OpenAI GPT — Payant (industrie standard)     │
+│ 4. 🔵 Google Gemini — Optionnel                     │
 ├─────────────────────────────────────────────────────┤
-│ 5. 🎭 Mode Démo — Réponses simulées pédagogiques  │
+│ 5. ⚠️ Sécurité anti-crash — Alerte Mode Hors-ligne  │
 └─────────────────────────────────────────────────────┘
 ```
 
-- **Chat contextuel** : historique + système prompt adapté au catalogue
-- **Questions suggérées** : insights automatiques selon état analytique
-- **Sans clés API** → Mode démo activé (aucun besoin d'action utilisateur)
+- **Chat contextuel** : historique + système prompt adapté au catalogue e-commerce.
+- **Résilience totale (UI Bulletproof)** : Si aucun fournisseur n'est disponible ou si les clés API manquent dans le `.env`, le routeur intercepte l'erreur proprement et bascule sur un affichage d'avertissement élégant dans Streamlit au lieu de faire crasher l'application.
 
-### 6️⃣ Architecture DevOps Native Python (Zero Docker)
+### 6️⃣ Architecture DevOps & Conteneurisation Multi-Services
 
-**Philosophie** : Simplicité + Reproductibilité + Transparence pour l'évaluateur
+**Philosophie** : Isolation, reproductibilité et robustesse de l'environnement d'exécution. Le projet est entièrement orchestré via Docker pour simplifier le déploiement multi-services.
 
 ```
 smart-ecommerce-intelligence/
 ├── .env.example              ← Template config (commité, pas de secrets)
-├── requirements.txt          ← Versions gelées (reproductibilité garantie)
-├── run_local.py             ← Point d'entrée unique (orchestration ML)
-├── dashboard/app.py         ← Streamlit (défensif, 600+ lignes)
+├── requirements.txt          ← Versions gelées
+├── run_local.py              ← Script d'orchestration ML local
+├── docker-compose.yml        ← Orchestration des services (Pipeline, Dashboard, MCP)
+├── mlops/                    ← Infrastructure de production
+│   └── docker/
+│       ├── Dockerfile.pipeline   (Scraping + Playwright Headless + ML)
+│       ├── Dockerfile.dashboard  (Interface Streamlit BI)
+│       └── Dockerfile.mcp        (Serveur Model Context Protocol)
 │
 ├── agents/                  ← Scraping A2A
 │   ├── base_agent.py        (ABC async)
@@ -453,18 +457,18 @@ DASHBOARD_PORT=8501
 
 ## 🛡️ Choix d'Architecture (Justifications)
 
-### ✅ Pourquoi **pas de Docker** ?
+### ✅ Pourquoi Docker pour la production ?
 
-| Aspect | Python native | Docker |
-|--------|--------------|--------|
-| **Transparence** | Code visible, venv simple | Abstraction couches |
-| **Installation** | `pip install` 1 min | Build image 5+ min |
-| **Debugging** | Logs/traces directs | Inside container |
-| **Évaluation** | Prof voit tout | Black-box pour prof |
-| **Taille repo** | ~500 KB | +2 GB images |
-| **Portabilité** | Requiert Python 3.11 | Multi-plateforme auto |
+| Aspect | Docker | Python native |
+|--------|--------|--------------|
+| **Isolation** | Conteneurs isolés | Env global |
+| **Reproductibilité** | Image fixe | Dépend de l'OS |
+| **Déploiement** | Push image | Setup manuel |
+| **Orchestration** | docker-compose | Scripts custom |
+| **Scalabilité** | Multi-services | Monolithique |
+| **Production** | Standard industrie | Dev friendly |
 
-→ **Choix** : Native Python pour clarté académique
+→ **Choix** : Docker pour robustesse production + Python local pour développement
 
 ### ✅ Pourquoi **Streamlit** (pas Django/FastAPI) ?
 
@@ -548,7 +552,6 @@ smart-ecommerce-intelligence/
 │
 ├── 📂 ml/                            ← Pipeline ML Data Mining
 │   ├── __init__.py
-│   ├── pipeline.py                   (orchestration alternative)
 │   ├── cleaner.py                    (load_latest_raw_products, clean())
 │   ├── feature_engineering.py        (20 features)
 │   ├── random_forest_model.py        (RandomForest + save)
@@ -585,7 +588,9 @@ smart-ecommerce-intelligence/
 │
 └── 📂 mlops/                         ← Infra (Kubeflow, K8s)
     └── docker/
-        └── Dockerfile               (optionnel, zero-requirement)
+        ├── Dockerfile.pipeline       (Scraping + Playwright Headless + ML)
+        ├── Dockerfile.dashboard      (Interface Streamlit BI)
+        └── Dockerfile.mcp            (Serveur Model Context Protocol)
 ```
 
 ---
@@ -609,6 +614,7 @@ smart-ecommerce-intelligence/
 | **Association Rules** | Apriori + metrics (lift) | `ml/apriori_rules.py` |
 | **Defensive Programming** | Try/except systématique | `dashboard/app.py` |
 | **Git Workflow** | .gitignore (115 items), .env secrets | `.gitignore` |
+| **Conteneurisation** | Docker multi-services | `mlops/docker/` |
 
 ---
 
@@ -626,6 +632,9 @@ python run_local.py --input data/raw/test.json 2>&1 | tee pipeline.log
 
 # Réinitialiser & rejouer
 rm -rf data/processed/*.csv ml/models/*.joblib && python run_local.py
+
+# Avec Docker (production)
+docker-compose up -d
 ```
 
 ---
@@ -701,9 +710,9 @@ coverage run -m pytest tests/ && coverage report
 - Google Gemini : https://aistudio.google.com
 
 ### DevOps & CI/CD
+- Docker & docker-compose : https://www.docker.com/
 - Kubeflow pipelines (future) : https://www.kubeflow.org/
 - GitHub Actions (future) : https://github.com/features/actions
-- Docker (optional) : https://www.docker.com/
 
 ---
 
@@ -715,8 +724,6 @@ Ce projet est un **travail académique FST Tanger**. Les contributions sont bien
 - **"Aucune donnée au premier lancement"** → Exécute `python data/generate_synthetic.py 500` d'abord
 - **"Dashboard ne démarre pas"** → Vérifie `streamlit run dashboard/app.py` (port 8501 libre)
 - **"Modèles ne se sauvegardent pas"** → Vérifie `ml/models/` existe et writable
-
----
 
 ---
 
@@ -740,6 +747,7 @@ Ce projet démontre une **approche de ML Engineering production-ready** :
 - ✅ IA intégrée avec fallback intelligent
 - ✅ Documentation complète + cas d'usage réels
 - ✅ Architecture extensible vers Kubeflow/K8s
+- ✅ Conteneurisation multi-services avec Docker
 
 **Résultat** : Un système **prêt pour l'action** 🚀
 
@@ -749,4 +757,3 @@ Ce projet démontre une **approche de ML Engineering production-ready** :
 **Version** : 1.0.0 (Production Ready)
 
 (Libre d'usage académique, commercial ok avec attribution.)
-
